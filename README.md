@@ -101,14 +101,23 @@ The oscilloscope used above (a Siglent SDS1202X-E) exposes a SCPI socket on the 
   - Confirmed further with a momentary Flatten press, sampled 8 times over the run: both #18–19 and #20–21 were still drifting in the first two samples, then **landed on exactly `0x0000` simultaneously** and held there once the base finished flattening — `0` is the flat/home reference for both axes. Bytes #9 and #11 also flip state at the same instant, looking like a separate "system moving / idle" status flag independent of the per-button bitmask (which stays `0x00` throughout since Flatten is momentary, not held).
 - **Byte #27 looks like a motor current/voltage-sense reading**, not position: it sits in a narrow band (`0x46`–`0x4D`) and steps by a small fixed amount exactly when a motor transitions from actively driving to stalled/idle — consistent with supply-rail sag under motor load rather than a per-axis encoder value (Head Up and Foot Up read identically, which a true per-axis position value shouldn't).
 - **Other bytes in the middle block** (roughly #22–26, #30) still vary between captures with no obvious pattern tied to button state or position — likely a rolling counter, timestamp, or checksum. Not yet understood.
+- **Byte #4 is a second, separate status byte for the Light button** (distinct from the directional bitmask at #3): `0x00` idle/released, `0x02` (header bit set) while Light is being pressed, confirmed clean across 6 alternating held/released rounds with zero exceptions. Like the directional buttons, this only reflects "button currently pressed," not the bulb's actual on/off state.
+- **Byte #11 carries the actual persistent light on/off state** — separate from byte #4's momentary press flag. Confirmed with 4 samples of the light physically on and 4 of it physically off (spread across a full on/off/on/off/on/off sequence): reads exactly `0x21` (no header bit) every time the light is on, and exactly `0x20` (header bit set) every time it's off — zero variation within either group, zero overlap between them. Byte #11 also shifted value during the earlier Flatten test (`0x24` vs `0x20`-with-header while moving), so it's likely a small multi-purpose status/flags byte where the light state is one confirmed bit — its other bits (e.g. a possible "system moving" flag) aren't disentangled yet.
 
 ## Next Steps
-1. Decode the remaining buttons: massage functions, light, and presets 1/2/3.
+1. Decode the remaining buttons: massage functions (3 icons), timers (10/20/30), memory presets (red/amber/green), and preset 1/2/3.
 2. Map the raw values of bytes #18–19 / #20–21 to actual physical angle (e.g. capture at both extreme travel limits and at several points in between) to get real min/max/scale.
 3. Identify the remaining unexplained bytes (#22–26, #30) — rule out rolling counter vs. checksum vs. something else.
-4. Confirm the button bitmask combines correctly (e.g. Head Up + Foot Up → `0x05`).
-5. Interface with Home Assistant: build a way to both listen to and *transmit* this 9-bit protocol from an ESP module (most UART peripherals only support 8 data bits, so this will need extra care).
-6. Control Bed: use the confirmed directional bitmask and position telemetry to drive real motor commands via Home Assistant with position feedback.
+4. Fully decode byte #11's other bits (light state is bit 0; what are the rest?).
+5. Confirm the button bitmask combines correctly (e.g. Head Up + Foot Up → `0x05`).
+6. Interface with Home Assistant: build a way to both listen to and *transmit* this 9-bit protocol from an ESP module (most UART peripherals only support 8 data bits, so this will need extra care).
+7. Control Bed: use the confirmed directional bitmask and position telemetry to drive real motor commands via Home Assistant with position feedback.
+
+## Tooling Notes
+- [`tools/scope_capture.py`](tools/scope_capture.py) talks to the Siglent scope over SCPI (port 5025) and auto-saves every raw waveform it fetches into `captures/raw/` with a timestamped filename.
+- The scope's built-in trigger is a **Serial** pattern trigger (`TRSE? → SERIAL`) tuned to lock onto this bus — it's fragile. Changing memory depth (`MSIZ`) can knock it out of lock (leaves it stuck in `Ready`, never firing); if that happens, front-panel re-selecting the Serial decode/trigger is more reliable than trying to fix it blind over SCPI.
+- A Saleae Logic analyzer (`fx2lafw` via `sigrok-cli`) was also tried for continuous multi-button capture. Signal integrity was poor over bare single-wire probes (real EMI pickup from the motor drivers, confirmed by seeing sub-microsecond chatter appear only once sampling past 1MHz) — a twisted signal+ground pair was suggested as the fix but not yet retested. The scope's shielded probe doesn't have this problem.
+- The bus is **not continuously active** — real packets ("bursts" of ~46-47 frames) are separated by long silent gaps of roughly 120-150ms. Any decoder working from a free-running/untriggered capture needs to segment on those idle gaps first before decoding, rather than assuming byte-grid alignment from sample 0.
 
 
 ## Conclusion
