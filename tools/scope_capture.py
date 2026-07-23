@@ -4,15 +4,20 @@ Capture and decode the sync-bus signal from a Siglent SDS1000X-E oscilloscope
 over its SCPI socket (port 5025), for reverse-engineering the Keeson MC122SP
 sync protocol.
 
-Findings so far (idle-line capture, 2026-07-18):
+Findings so far (see README.md "Protocol Findings" for the full writeup):
   - Bit period: 26,000 ns (~38,461 baud -- close to but not exactly 38400)
-  - Frame: 1 start bit + 9 data bits + 1 stop bit = 11 unit intervals
+  - Frame: 8E1 UART -- 1 start bit + 8 data bits + 1 even-parity bit + 1 stop
+    bit = 11 unit intervals. This decoder reads the parity bit as if it were
+    a 9th data bit (harmless -- it's masked off when returning the byte
+    value), and reports it in the "header" field, but it's just parity, not
+    a semantic marker as first assumed.
   - Frames are sent back-to-back with zero idle gap and zero jitter
-    (286.00 us frame period, confirmed across 46 consecutive frames)
-  - Bit 9 (the 9th/last data bit) looks like an address/header marker,
-    matching the classic 9-bit multiprocessor-UART scheme: header bytes
-    (bit9=1) are followed by one or more payload bytes (bit9=0) until the
-    next header.
+    (286.00 us frame period, confirmed across dozens of captures).
+  - Packet layout: byte 0 = payload length (total packet = length + 3),
+    byte 1 = source address (0x07 = bed, 0x01 = commander), last byte = CRC
+    (inverted 8-bit sum of every preceding byte -- sum of the whole packet
+    including the CRC is always 0xFF mod 256). See validate_packet() and
+    build_command_packet() below.
 
 Usage:
     python3 scope_capture.py [scope_ip] [--channel C1] [--out capture.bin]
@@ -129,6 +134,54 @@ def decode_9bit_uart(samples, sample_rate_hz=1e9, bit_ns=BIT_NS):
     return frames
 
 
+def validate_packet(frames):
+    """Check a decoded frame list against the length/CRC rules.
+
+    Returns (is_valid, reason). A truncated capture (missing a byte at
+    either edge of the burst) will fail this even though every individual
+    frame decoded with a good stop bit -- that's the point: it catches
+    incomplete captures that per-frame stop-bit checking can't see.
+    """
+    if not frames:
+        return False, "no frames"
+    values = [f["byte"] for f in frames]
+    length_field = values[0]
+    expected_total = length_field + 3
+    if len(values) != expected_total:
+        return False, f"expected {expected_total} bytes (length byte={length_field}), got {len(values)}"
+    checksum = sum(values) & 0xFF
+    if checksum != 0xFF:
+        return False, f"checksum mod 256 = 0x{checksum:02X}, expected 0xFF"
+    return True, "ok"
+
+
+def build_command_packet(payload_after_source, source=0x01):
+    """Build a full command packet (length + source + payload + CRC) ready to transmit.
+
+    payload_after_source is everything after the source-address byte, e.g.
+    bytes([0x01, 0x00, 0x00, 0x00, 0x00]) for Head Up (button bitmask 0x01
+    in the first payload byte). UNTESTED -- transmitting has not been tried
+    yet; see the README's "Transmitting" section for the command table this
+    was derived from and the open questions around bus safety.
+    """
+    payload_after_source = bytes(payload_after_source)
+    length_field = len(payload_after_source)
+    body = bytes([length_field, source]) + payload_after_source
+    crc = (~sum(body)) & 0xFF
+    return body + bytes([crc])
+
+
+KNOWN_COMMANDS = {
+    "full_stop": bytes([0x00, 0x00, 0x00, 0x00, 0x00]),
+    "head_up": bytes([0x01, 0x00, 0x00, 0x00, 0x00]),
+    "head_down": bytes([0x02, 0x00, 0x00, 0x00, 0x00]),
+    "foot_up": bytes([0x04, 0x00, 0x00, 0x00, 0x00]),
+    "foot_down": bytes([0x08, 0x00, 0x00, 0x00, 0x00]),
+    "zero_gravity": bytes([0x00, 0x10, 0x00, 0x00, 0x00]),
+    "flat": bytes([0x00, 0x00, 0x00, 0x08, 0x00]),
+}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("host", help="Oscilloscope IP address")
@@ -163,7 +216,8 @@ def main():
 
     frames = decode_9bit_uart(samples, sample_rate_hz=sample_rate)
     bad = sum(1 for f in frames if not f["stop_ok"])
-    print(f"# {len(frames)} frames decoded, {bad} bad stop bits", file=sys.stderr)
+    valid, reason = validate_packet(frames)
+    print(f"# {len(frames)} frames decoded, {bad} bad stop bits, packet {'VALID' if valid else 'INVALID: ' + reason}", file=sys.stderr)
 
     prev_t = None
     for f in frames:
