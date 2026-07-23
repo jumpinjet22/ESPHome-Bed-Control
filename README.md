@@ -117,7 +117,19 @@ Independently reverse-engineered from scratch, then cross-checked against an exi
   - Confirmed further with a momentary Flatten press, sampled 8 times over the run: both #18–19 and #20–21 were still drifting in the first two samples, then **landed on exactly `0x0000` simultaneously** and held there once the base finished flattening — `0` is the flat/home reference for both axes.
   - Per the community write-up, these positions are **purely virtual/estimated** (no physical position sensor) — the controller infers them from motor run time and load, so they can drift and need periodic recalibration via the Flat button or by holding a direction button after bottoming out.
 - **Byte #4 is a second, separate status byte for the Light button** (distinct from the directional bitmask at #2): `0x00` idle/released, `0x02` (parity bit set) while Light is being pressed, confirmed clean across 6 alternating held/released rounds with zero exceptions. Like the directional buttons, this only reflects "button currently pressed," not the bulb's actual on/off state. Not covered by the community write-up — this one's ours.
-- **Byte #11 carries the actual persistent light on/off state** — separate from byte #4's momentary press flag. Confirmed with 4 samples of the light physically on and 4 of it physically off (spread across a full on/off/on/off/on/off sequence): reads exactly `0x21` (no parity bit) every time the light is on, and exactly `0x20` (parity bit set) every time it's off — zero variation within either group, zero overlap between them. Byte #11 also shifted value during the earlier Flatten test (`0x24` vs `0x20`-with-parity while moving), so it's likely a small multi-purpose status/flags byte where the light state is one confirmed bit — its other bits (e.g. a possible "system moving" flag) aren't disentangled yet. Also not covered by the community write-up.
+- **Byte #11 carries the actual persistent light on/off state** — separate from byte #4's momentary press flag. Confirmed with 4 samples of the light physically on and 4 of it physically off (spread across a full on/off/on/off/on/off sequence): reads exactly `0x21` (no parity bit) every time the light is on, and exactly `0x20` (parity bit set) every time it's off — zero variation within either group, zero overlap between them. During a Memory Red recall (light on at the time), byte #11 read `0x25` instead of the expected `0x21` (`0x25 = 0x21 | 0x04`) — a single data point, not confirmed as a general pattern, but worth another look if `0x25` shows up again. Also not covered by the community write-up.
+- **Byte #3 is a second bitmask, for "special function" buttons** (separate from the directional bitmask at byte #2), confirmed by holding/tapping each button and watching the byte change:
+
+  | Value | Button |
+  |---|---|
+  | `0x02` | Timer (the clock-icon button between the massage zone buttons — cycles 10/20/30 min with repeated taps, not 3 separate buttons) |
+  | `0x04` | Massage — right zone (held steady the whole press, doesn't pulse) |
+  | `0x08` | Massage — left zone (confirmed while cycling through massage modes — same value on every tap) |
+  | `0x10` | Zero Gravity (matches the community write-up exactly) |
+
+  Massage-left and Timer showed the value appearing in short repeated blips rather than one sustained block — that's the user tapping through multiple modes/durations on the same button, not the protocol itself pulsing.
+- **Timer triggers active massage, not just a flag.** Once a massage motor is running, byte #14 (and correlated bytes #15, #22, #24, #26, #30, #46) continuously ramp — byte #14 counts smoothly down and then wraps and keeps descending again (`...0x0F → 0x00 → 0xE4 → 0xD7...`), a repeating sawtooth rather than a one-shot countdown. Reads like a live massage-intensity/PWM modulation value tied to the running motor, not a "time remaining" field — exact meaning still open, needs more isolated testing.
+- **Memory Red recalls a saved head/foot position.** Bytes #2/#3/#5 never showed a distinct trigger bit for it (likely too brief to catch at our ~0.06s sampling, or it's in a byte we haven't checked), but the *result* is unambiguous and highly reproducible: two separate presses both drove the bed to the exact same targets — head froze at `0x0720` both times, foot climbed toward `0x0DAD` both times (froze there fully on the first attempt) — the same drift-then-freeze signature used to identify the position bytes in the first place, just now triggered autonomously by a memory recall instead of a held directional button.
 
 ## CRC / Packet Validation (confirmed 2026-07-19)
 The community write-up's checksum claim — "an inverted 8-bit sum (1's complement); summing all bytes including the CRC always equals `0xFF`" — checks out exactly against our own captures, and let us pin down the exact length formula too: **`total_packet_length = length_field + 3`** (their own worked example: length field `0x18`=24, total 27 bytes, 24+3=27 ✓; our captures: length field `0x2C`=44, total 47 bytes, 44+3=47 ✓ — their write-up's literal description of the length field was a little imprecise, but this formula held perfectly on every complete capture we had).
@@ -137,13 +149,13 @@ We have not attempted to transmit anything yet — everything so far has been pa
 - The multi-base sync/master-slave question from earlier tonight is *not* addressed by this write-up either — still open.
 
 ## Next Steps
-1. Decode the remaining buttons: massage functions (3 icons), timers (10/20/30), memory presets (red/amber/green), and preset 1/2/3.
-2. Catch the Zero G (byte #3 = `0x10`) and Flat (byte #5 = `0x08`) momentary flags live, now that we know which bytes to watch.
-3. Map the raw position values to actual physical angle if possible, keeping in mind they're virtual/estimated, not a real sensor reading.
-4. Identify the remaining unaccounted-for bytes (roughly #26–43 excluding load/CRC) — rule out padding vs. something real.
-5. Fully decode byte #11's other bits (light state is bit 0; what are the rest?).
-6. Confirm the button bitmask combines correctly (e.g. Head Up + Foot Up → `0x05`).
-7. Verify the CRC algorithm (inverted 8-bit sum) against our own captured packets.
+1. Decode Memory Amber and Memory Green (single tap only — same recall behavior expected as Memory Red, just different saved positions). Preset 1/2/3 also still untested.
+2. Catch the Flat momentary flag (byte #5 = `0x08`) live — never actually observed yet, only documented from the community write-up.
+3. Catch Memory Red's actual trigger bit/byte, if it has one distinct from the position-recall movement itself (tried at ~0.06s sampling and missed it both times — may need faster sampling or a different byte entirely).
+4. Figure out what byte #14 (and correlated #15/#22/#24/#26/#30/#46) actually represents during active massage — the sawtooth pattern suggests live intensity/PWM modulation, not confirmed.
+5. Map the raw position values to actual physical angle if possible, keeping in mind they're virtual/estimated, not a real sensor reading.
+6. Identify the remaining unaccounted-for bytes — rule out padding vs. something real.
+7. Confirm the byte #2 directional bitmask combines correctly (e.g. Head Up + Foot Up → `0x05`), and check whether byte #3's special-function bitmask does too.
 8. Determine the sync line's electrical drive type (open-drain vs. push-pull) before ever attempting to transmit.
 9. Interface with Home Assistant: build a way to both listen to and *transmit* this protocol from an ESP module (8E1 framing is standard UART, so this is more tractable than we first thought when we assumed 9 raw data bits).
 10. Control Bed: use the confirmed directional bitmask, position telemetry, and the community write-up's command payloads to drive real motor commands via Home Assistant.
