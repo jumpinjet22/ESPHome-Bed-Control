@@ -59,24 +59,31 @@ def query_sample_rate(sock):
     return float(text)
 
 
-def fetch_waveform(sock, channel="C1"):
-    """Fetch raw DAT2 waveform bytes for a channel, return numpy int8 array."""
-    sock.sendall(f"{channel}:WF? DAT2\n".encode())
-    time.sleep(0.2)
-    sock.settimeout(3.0)
-    raw = b""
-    try:
-        while True:
-            chunk = sock.recv(1 << 20)
-            if not chunk:
-                break
-            raw += chunk
-    except socket.timeout:
-        pass
+def fetch_waveform(sock, channel="C1", safety_timeout=10.0):
+    """Fetch raw DAT2 waveform bytes for a channel, return numpy int8 array.
 
-    hash_idx = raw.index(b"#9")
-    header_end = hash_idx + 2 + 9
-    n = int(raw[hash_idx + 2:hash_idx + 2 + 9])
+    Reads exactly the byte count the scope declares in the '#9<9-digit-length>'
+    block header, instead of waiting for a socket timeout to signal end-of-data --
+    that timeout wait was padding every capture regardless of actual transfer time.
+    """
+    sock.sendall(f"{channel}:WF? DAT2\n".encode())
+    sock.settimeout(safety_timeout)
+    raw = b""
+    header_end = None
+    n = None
+    total_needed = None
+    while total_needed is None or len(raw) < total_needed:
+        chunk = sock.recv(1 << 20)
+        if not chunk:
+            break
+        raw += chunk
+        if total_needed is None and b"#9" in raw:
+            hash_idx = raw.index(b"#9")
+            if len(raw) >= hash_idx + 2 + 9:
+                header_end = hash_idx + 2 + 9
+                n = int(raw[hash_idx + 2:hash_idx + 2 + 9])
+                total_needed = header_end + n
+
     payload = raw[header_end:header_end + n]
     return np.frombuffer(payload, dtype=np.int8).astype(np.int32)
 

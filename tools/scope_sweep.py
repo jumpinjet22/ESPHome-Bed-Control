@@ -16,7 +16,7 @@ import sys
 import time
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
-from scope_capture import scpi_connect, fetch_waveform, decode_9bit_uart  # noqa: E402
+from scope_capture import scpi_connect, fetch_waveform, decode_9bit_uart, query_sample_rate  # noqa: E402
 
 
 def main():
@@ -31,6 +31,8 @@ def main():
     out = open(args.out, "w") if args.out else sys.stdout
 
     s = scpi_connect(args.host)
+    sample_rate = query_sample_rate(s)
+    print(f"# sample rate: {sample_rate/1e6:.2f} MSa/s", file=sys.stderr)
     start = time.time()
     n = 0
     while time.time() - start < args.duration:
@@ -41,10 +43,11 @@ def main():
             print(f"# capture failed: {e}", file=sys.stderr)
             s.close()
             s = scpi_connect(args.host)
+            sample_rate = query_sample_rate(s)
             continue
         n += 1
         elapsed = time.time() - start
-        frames = decode_9bit_uart(samples)
+        frames = decode_9bit_uart(samples, sample_rate_hz=sample_rate)
         out.write(f"=== capture {n} at t+{elapsed:.2f}s ===\n")
         for f in frames:
             marker = "HDR" if f["header"] else "   "
