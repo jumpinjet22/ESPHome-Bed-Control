@@ -17,11 +17,7 @@ import time
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 from scope_capture import scpi_connect, fetch_waveform, decode_9bit_uart, query_sample_rate, validate_packet  # noqa: E402
-
-# Empirically measured full-travel endpoints (headup_series.txt / footup_series.txt,
-# each driven to its mechanical limit) -- see README.md "Protocol Findings".
-HEAD_MAX = 12698
-FOOT_MAX = 10816
+from bed_fields import HEAD_MAX, FOOT_MAX, decode_fields  # noqa: E402
 
 CLEAR = "\033[2J\033[H"
 
@@ -30,54 +26,6 @@ def bar(pct, width=30):
     pct = max(0.0, min(1.0, pct))
     filled = int(round(pct * width))
     return "[" + "#" * filled + "-" * (width - filled) + f"] {pct * 100:5.1f}%"
-
-
-def decode_fields(values):
-    b2, b3, b4, b5, b11 = values[2], values[3], values[4], values[5], values[11]
-    head = values[18] | (values[19] << 8)
-    foot = values[20] | (values[21] << 8)
-    head_load = values[22] | (values[23] << 8)
-    foot_load = values[24] | (values[25] << 8)
-
-    directional = []
-    if b2 & 0x01:
-        directional.append("HEAD UP")
-    if b2 & 0x02:
-        directional.append("HEAD DOWN")
-    if b2 & 0x04:
-        directional.append("FOOT UP")
-    if b2 & 0x08:
-        directional.append("FOOT DOWN")
-
-    function_bits = []
-    if b3 & 0x02:
-        function_bits.append("TIMER")
-    if b3 & 0x04:
-        function_bits.append("MASSAGE RIGHT")
-    if b3 & 0x08:
-        function_bits.append("MASSAGE LEFT")
-    if b3 & 0x10:
-        function_bits.append("ZERO-G (trigger)")
-    if b3 & 0x20:
-        function_bits.append("MEMORY AMBER? (trigger, unconfirmed)")
-    if b3 & 0x40:
-        function_bits.append("MEMORY GREEN (trigger)")
-    if b4 & 0x01:
-        function_bits.append("MEMORY RED (trigger)")
-    if b4 & 0x02:
-        function_bits.append("LIGHT (held)")
-    if b5 & 0x08:
-        function_bits.append("FLAT (trigger)")
-
-    return {
-        "head": head, "foot": foot,
-        "head_load": head_load, "foot_load": foot_load,
-        "directional": directional, "function_bits": function_bits,
-        "light_on": bool(b11 & 0x01),
-        "cancelling": bool(b11 & 0x02),
-        "traveling": bool(b11 & 0x04),
-        "b11_raw": b11, "b14_raw": values[14],
-    }
 
 
 def render(values, is_valid, reason, poll_hz):
